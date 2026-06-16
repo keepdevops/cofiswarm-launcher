@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""brewctl — unified CLI for the cofiswarm control plane.
+
+    brewctl up [--no-rag]       Bring up the full stack: pgvector + RAG sidecar + proxy + UI.
+    brewctl down [--full]       Stop UI/proxy/coordinator/workers/sidecar (+pgvector with --full).
+    brewctl check               Show running llama-server processes + RAM/port/model.
+    brewctl launch              Start proxy + UI only (no pgvector, no sidecar).
+    brewctl shutdown            Stop UI, proxy, coordinator, and worker processes.
+    brewctl rag index <path>    Walk path, chunk, embed, upsert into pgvector.
+    brewctl rag query <text>    Run a top-k retrieval and print results.
+    brewctl rag sources         List ingested sources (path, chunk count, latest).
+    brewctl rag delete <path>   Remove all chunks for one source_path.
+    brewctl rag health          Probe pgvector connectivity.
+    brewctl agents              Show agent engines + inference_backend overrides.
+
+check/launch/shutdown are implemented natively in orchestration/lifecycle/.
+The legacy matrix-{1,2,3}-*.sh scripts are still present but deprecated.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import sys
+import urllib.request
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+from orchestration.lifecycle import (  # noqa: E402
+    rag_embedder, run_check, run_down, run_launch, run_shutdown, run_up,
+)
+from orchestration.rag import chunk_text, retrieve  # noqa: E402
+from orchestration.rag.embed import HashEmbedder, MLXEmbedder  # noqa: E402
+from orchestration.rag.store import PgVectorStore, UpsertRow  # noqa: E402
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("brewctl")
+
+INDEXABLE = {".py", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".c",
+             ".ts", ".tsx", ".js", ".jsx", ".md", ".txt", ".yaml", ".yml"}
+
+
+def _pick_embedder(name: str):
+    if name == "mlx":
+        return MLXEmbedder()
+    if name == "hash":
+        return HashEmbedder()
+    raise ValueError(f"unknown embedder: {name}")
+
+
+async def _index(path: Path, embedder, store: PgVectorStore) -> int:
+    files = [p for p in path.rglob("*")
+             if p.is_file() and p.suffix.lower() in INDEXABLE
+             and "node_modules" not in p.parts and "build" not in p.parts]
+    logger.info("indexing %d files under %s", len(files), path)
+
+    total = 0
+    batch: list[UpsertRow] = []
+    for fp in files:
+        try:
+            text = fp.read_text(errors="replace")
+        except OSError as exc:
+            logger.error("read failed %s: %s", fp, exc)
+            continue
+        chunks = chunk_text(str(fp), text)
+        if not chunks:
+            continue
+        vecs = await embedder.embed([c.content for c in chunks])
+        for c, v in zip(chunks, vecs):
+            batch.append(UpsertRow(
+                source_path=c.source_path,
+                chunk_idx=c.chunk_idx,
+                content=c.content,
+                embedding=v,
+                metadata=c.metadata,
+            ))
+        if len(batch) >= 256:
+            total += await store.upsert_chunks(batch)
+            batch.clear()
+    if batch:
+        total += await store.upsert_chunks(batch)
+    logger.info("upserted %d chunks", total)
+    return total
+
+
+async def _query(text: str, k: int, embedder, store: PgVectorStore) -> None:
+    hits = await retrieve(text, embedder=embedder, store=store, k=k)
+    for i, h in enumerate(hits):
+        print(f"#{i} dist={h.distance:.4f} {h.source_path}")
+        print("  " + (h.content[:200].replace("\n", " ⏎ ")) + ("..." if len(h.content) > 200 else ""))
+
+
+async def _sources(store: PgVectorStore) -> None:
+    rows = await store.list_sources()
+    if not rows:
+        print("(no sources indexed)")
+        return
+    print(f"{'CHUNKS':>7}  {'LATEST':<26}  SOURCE")
+    for r in rows:
+        print(f"{r['chunks']:>7}  {(r['latest'] or '-'):<26}  {r['source_path']}")
+
+
+async def _delete(source_path: str, store: PgVectorStore) -> None:
+    removed = await store.delete_source(source_path)
+    print(f"deleted {removed} chunks for {source_path}")
+
+
+async def _health(store: PgVectorStore) -> int:
+    try:
+        pool = await store._pool_or_connect()
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        print("ok")
+        return 0
+    except Exception as exc:
+        logger.error("rag health probe failed: %s", exc)
+        print(f"error: {exc}")
+        return 1
+
+
+def _show_agents() -> int:
+    port = os.environ.get("MATRIX_COORDINATOR_PORT", "3002")
+    url = f"http://127.0.0.1:{port}/api/agents"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            agents = json.loads(resp.read().decode())
+    except Exception as exc:
+        logger.error("GET %s failed: %s", url, exc)
+        return 1
+    if not agents:
+        print("(no agents)")
+        return 0
+    print(f"{'NAME':<16} {'ENGINE':<8} {'BACKEND':<10} {'INFERENCE':<14} PORT")
+    for a in agents:
+        print(f"{a.get('name','?'):<16} {a.get('engine','?'):<8} "
+              f"{a.get('backend',''):<10} {a.get('inference_backend','(legacy)'):<14} "
+              f"{a.get('port','?')}")
+    return 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="brewctl")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("check", help="Show running llama-server processes")
+    sub.add_parser("agents", help="List coordinator agents and backend overrides")
+    sub.add_parser("launch", help="Start proxy + UI only")
+    sub.add_parser("shutdown", help="Stop UI, proxy, coordinator, workers")
+
+    up = sub.add_parser("up", help="Bring up pgvector + sidecar + proxy + UI")
+    up.add_argument("--no-rag", action="store_true",
+                    help="Skip pgvector + ingest sidecar (proxy + UI only).")
+    up.add_argument("--no-index", action="store_true",
+                    help="Skip auto-indexing the repo on startup.")
+    up.add_argument("--index-path", type=Path, default=None,
+                    help="Directory to auto-index (default: repo root).")
+
+    dn = sub.add_parser("down", help="Stop UI/proxy/coordinator/workers/sidecar")
+    dn.add_argument("--full", action="store_true",
+                    help="Also stop the pgvector docker stack.")
+
+    rag = sub.add_parser("rag", help="RAG / pgvector ops")
+    rag_sub = rag.add_subparsers(dest="rag_cmd", required=True)
+
+    idx = rag_sub.add_parser("index", help="Index a directory")
+    idx.add_argument("path", type=Path)
+    idx.add_argument("--embedder", choices=["hash", "mlx"], default=rag_embedder())
+
+    qry = rag_sub.add_parser("query", help="Top-k retrieval")
+    qry.add_argument("text")
+    qry.add_argument("-k", type=int, default=3)
+    qry.add_argument("--embedder", choices=["hash", "mlx"], default=rag_embedder())
+
+    rag_sub.add_parser("sources", help="List ingested sources")
+
+    dele = rag_sub.add_parser("delete", help="Remove all chunks for one source_path")
+    dele.add_argument("source_path")
+
+    rag_sub.add_parser("health", help="Probe pgvector connectivity")
+
+    args = p.parse_args()
+
+    if args.cmd == "check":
+        return run_check()
+    if args.cmd == "agents":
+        return _show_agents()
+    if args.cmd == "launch":
+        return run_launch()
+    if args.cmd == "shutdown":
+        return run_shutdown()
+    if args.cmd == "up":
+        return run_up(no_rag=args.no_rag, no_index=args.no_index, index_path=args.index_path)
+    if args.cmd == "down":
+        return run_down(full=args.full)
+
+    needs_embedder = args.rag_cmd in {"index", "query"}
+    embedder = _pick_embedder(args.embedder) if needs_embedder else None
+    store = PgVectorStore()
+
+    rc = {"code": 0}
+
+    async def _go() -> None:
+        try:
+            if args.rag_cmd == "index":
+                await _index(args.path, embedder, store)
+            elif args.rag_cmd == "query":
+                await _query(args.text, args.k, embedder, store)
+            elif args.rag_cmd == "sources":
+                await _sources(store)
+            elif args.rag_cmd == "delete":
+                await _delete(args.source_path, store)
+            elif args.rag_cmd == "health":
+                rc["code"] = await _health(store)
+        finally:
+            await store.close()
+
+    asyncio.run(_go())
+    return rc["code"]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,276 @@
+#!/usr/bin/env node
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { homedir } from 'node:os';
+import { verifyLicense, deviceFingerprint } from './license.mjs';
+
+const SUPPORTED = { darwin: ['arm64'], linux: ['arm64', 'x64'] };
+const { platform, arch } = process;
+if (!SUPPORTED[platform]?.includes(arch)) {
+  console.error(
+    `[matrix] Unsupported platform: ${platform}-${arch}. ` +
+    `Supported: macOS (arm64) and Linux (x64, arm64).`
+  );
+  process.exit(1);
+}
+
+const here = dirname(fileURLToPath(import.meta.url));
+const pkgRoot = resolve(here, '..');
+const dist = join(pkgRoot, 'dist');
+const binDir = join(dist, 'bin');
+const proxyBin = join(binDir, 'proxy');
+const coordBin = join(binDir, 'coordinator');
+const webDir = join(dist, 'web');
+const pythonDir = join(dist, 'python');
+const venvPy = join(pythonDir, '.venv', 'bin', 'python');
+const pyAvailable = existsSync(venvPy);
+
+// ── Licensing ────────────────────────────────────────────────────────────────
+const licenseFile = join(homedir(), '.matrix', 'license.key');
+const pubkeyPath = join(here, 'pubkey.pem');
+const SERVER_GRACE_DAYS = 14;
+const PURCHASE_URL = 'https://coficube.com';
+
+// `matrix activate <key>` — verify and store a license key, then exit.
+if (process.argv[2] === 'activate') {
+  const key = (process.argv[3] || '').trim();
+  if (!key) { console.error('[matrix] usage: matrix activate <license-key>'); process.exit(1); }
+  const pub = existsSync(pubkeyPath) ? readFileSync(pubkeyPath, 'utf8') : null;
+  const res = pub ? verifyLicense(key, pub, { graceDays: SERVER_GRACE_DAYS }) : { ok: false, reason: 'no-pubkey' };
+  if (!res.ok) { console.error(`[matrix] invalid license (${res.reason}).`); process.exit(1); }
+  mkdirSync(dirname(licenseFile), { recursive: true });
+  writeFileSync(licenseFile, key + '\n', { mode: 0o600 });
+  console.log(`[matrix] activated ${res.claims.type} license for ${res.claims.email} → ${licenseFile}`);
+  process.exit(0);
+}
+
+for (const p of [proxyBin, coordBin]) {
+  if (!existsSync(p)) {
+    console.error(
+      `[matrix] Missing binary: ${p}\n` +
+      `Try reinstalling: npm i -g @keepdevops/matrix`
+    );
+    process.exit(1);
+  }
+}
+
+const args = parseArgs(process.argv.slice(2));
+if (args.help) { printHelp(); process.exit(0); }
+
+// License gate — verify, choose the bind host, enforce device binding.
+const license = resolveLicense();
+const licType = license.ok ? license.claims.type : 'desktop';
+const bindHost = process.env.MATRIX_BIND_HOST
+  || (licType === 'server' ? '0.0.0.0' : '127.0.0.1');
+console.log(`[matrix] license:     ${license.ok ? `${licType} (${license.claims.email})` : license.reason}`
+  + ` — network binding ${bindHost}${licType === 'desktop' ? ' (non-networked)' : ''}`);
+
+const proxyPort = Number(args.port ?? process.env.MATRIX_PROXY_PORT ?? 3002);
+const coordPort = Number(
+  args['coordinator-port'] ?? process.env.MATRIX_COORDINATOR_PORT ?? 8000
+);
+const uiPort = Number(args['ui-port'] ?? process.env.MATRIX_UI_PORT ?? 3000);
+const orchPort = Number(args['orchestrate-port'] ?? process.env.ORCH_SIDECAR_PORT ?? 3003);
+const ragPort = Number(args['rag-port'] ?? process.env.RAG_INGEST_PORT ?? 8001);
+const ragEmbedder = String(args['rag-embedder'] ?? process.env.RAG_INGEST_EMBEDDER ?? 'mlx');
+
+const configPath = resolveConfig(args, pkgRoot);
+console.log(`[matrix] config:      ${configPath}`);
+
+// Stage a writable runtime working dir; the C++ proxy treats it as the project
+// root (via MATRIX_PROJECT_ROOT, set below) and reads/writes swarm-config.json,
+// config/coordinator.json, agent_logs/ and logs/ there — keeping runtime state
+// out of the (possibly read-only) install tree.
+const runDir = join(homedir(), '.matrix', 'run');
+const slotsDir = join(homedir(), '.matrix', 'slots');
+mkdirSync(runDir, { recursive: true });
+mkdirSync(join(runDir, 'logs'), { recursive: true });
+mkdirSync(join(runDir, 'agent_logs'), { recursive: true });
+mkdirSync(join(runDir, 'config'), { recursive: true });
+mkdirSync(slotsDir, { recursive: true });
+copyFileSync(configPath, join(runDir, 'swarm-config.json'));
+// coordinator.json ships in dist/config/; stage it so the proxy's configure +
+// port-write paths resolve it under the run dir.
+const coordJson = join(dist, 'config', 'coordinator.json');
+if (existsSync(coordJson)) copyFileSync(coordJson, join(runDir, 'config', 'coordinator.json'));
+
+const env = {
+  ...process.env,
+  MATRIX_PROXY_PORT: String(proxyPort),
+  MATRIX_COORDINATOR_PORT: String(coordPort),
+  MATRIX_ACTIVE_CONFIG: join(runDir, 'matrix-active-config.json'),
+  MATRIX_PROJECT_ROOT: runDir,               // proxy reads/writes swarm-config.json, config/, agent_logs/ here
+  MATRIX_SLOTS_DIR: slotsDir,
+  MATRIX_BIND_HOST: bindHost,                // desktop=127.0.0.1 (non-networked), server=0.0.0.0
+  // Glue so the C++ services reach the Python sidecars:
+  MLX_COORD_PORT: String(orchPort),          // proxy → orchestrate sidecar (/api/orchestrate*)
+  ORCH_SIDECAR_PORT: String(orchPort),       // orchestrate sidecar's own port
+  RAG_INGEST_PORT: String(ragPort),
+  RAG_INGEST_EMBEDDER: ragEmbedder,
+  RAG_EMBED_URL: `http://127.0.0.1:${ragPort}/embed`, // coordinator query embedding
+};
+
+console.log(`[matrix] coordinator: http://127.0.0.1:${coordPort}`);
+const coordinator = spawn(coordBin, ['--config', join(runDir, 'swarm-config.json')], {
+  cwd: runDir, env, stdio: 'inherit',
+});
+
+console.log(`[matrix] proxy:       http://127.0.0.1:${proxyPort}`);
+const proxy = spawn(proxyBin, [], { cwd: runDir, env, stdio: 'inherit' });
+
+// Optional Python sidecars: orchestrate modes (:3003) + RAG embed/index (:8001).
+// Launched only when the bundled venv is present; otherwise the app runs C++-only.
+const pyChildren = [];
+if (pyAvailable) {
+  console.log(`[matrix] orchestrate: http://127.0.0.1:${orchPort} (python)`);
+  const orchestrate = spawn(
+    venvPy, ['-m', 'orchestration.mlx_coordinator.sidecar', '--port', String(orchPort)],
+    { cwd: pythonDir, env, stdio: 'inherit' },
+  );
+  console.log(`[matrix] rag-ingest:  http://127.0.0.1:${ragPort} (python, embedder=${ragEmbedder})`);
+  const ragIngest = spawn(
+    venvPy, ['scripts/rag-ingest-server.py', '--embedder', ragEmbedder],
+    { cwd: pythonDir, env, stdio: 'inherit' },
+  );
+  pyChildren.push(['orchestrate', orchestrate], ['rag-ingest', ragIngest]);
+} else {
+  console.warn(
+    '[matrix] Python venv not found (dist/python/.venv) — orchestrate modes + RAG disabled.\n' +
+    '         Enable: cd dist/python && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt',
+  );
+}
+
+const ui = startUiServer(webDir, uiPort);
+console.log(`[matrix] UI:          http://localhost:${uiPort}`);
+
+const shutdown = (sig) => {
+  console.log(`\n[matrix] received ${sig}, shutting down`);
+  for (const c of [coordinator, proxy, ...pyChildren.map(([, c]) => c)]) {
+    try { c.kill('SIGTERM'); } catch {}
+  }
+  try { ui.close(); } catch {}
+  setTimeout(() => process.exit(0), 500);
+};
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+// C++ services are critical — their exit shuts the app down.
+for (const [name, child] of [['coordinator', coordinator], ['proxy', proxy]]) {
+  child.on('exit', (code) => {
+    console.error(`[matrix] ${name} exited with code ${code}`);
+    shutdown(`${name}-exit`);
+  });
+}
+// Python sidecars are optional — log their exit but keep the app running.
+for (const [name, child] of pyChildren) {
+  child.on('exit', (code) => {
+    console.warn(`[matrix] ${name} (python) exited with code ${code} — that feature is now disabled`);
+  });
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+// Resolve + verify the license. Refuses to start without a valid one (unless
+// MATRIX_LICENSE_DEV=1, for source/dev builds). Server licenses get a grace window.
+function resolveLicense() {
+  if (process.env.MATRIX_LICENSE_DEV === '1') {
+    return { ok: true, dev: true, claims: { type: process.env.MATRIX_LICENSE_TYPE || 'server', email: 'dev', edition: 'dev' } };
+  }
+  const die = (msg) => {
+    console.error(`[matrix] ${msg}.\n  Purchase a license at ${PURCHASE_URL}, then run:  matrix activate <key>`);
+    process.exit(1);
+  };
+  const pub = existsSync(pubkeyPath) ? readFileSync(pubkeyPath, 'utf8') : null;
+  if (!pub) die('license public key missing from this build');
+  const key = (process.env.MATRIX_LICENSE
+    || (existsSync(licenseFile) ? readFileSync(licenseFile, 'utf8') : '')).trim();
+  if (!key) die('no license found');
+  const res = verifyLicense(key, pub, { graceDays: SERVER_GRACE_DAYS });
+  if (!res.ok) die(`license ${res.reason}`);
+  if (res.claims.type === 'desktop' && res.claims.device_fp
+      && res.claims.device_fp !== deviceFingerprint()) {
+    die('license is bound to a different device');
+  }
+  return res;
+}
+
+function parseArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '-h' || a === '--help') { out.help = true; continue; }
+    if (a.startsWith('--')) {
+      const key = a.slice(2);
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('--')) out[key] = true;
+      else { out[key] = next; i++; }
+    }
+  }
+  return out;
+}
+
+function resolveConfig(args, pkgRoot) {
+  const candidates = [
+    args.config,
+    args.profile && join(pkgRoot, 'dist/config', `${args.profile}.json`),
+    join(process.cwd(), 'matrix.config.json'),
+    join(homedir(), '.matrix', 'config.json'),
+    join(pkgRoot, 'dist/config/default.json'),
+  ].filter(Boolean);
+
+  for (const c of candidates) {
+    if (existsSync(c)) return resolve(c);
+  }
+  console.error('[matrix] no config found and no bundled default');
+  process.exit(1);
+}
+
+function startUiServer(root, port) {
+  const mime = {
+    '.html': 'text/html', '.js': 'application/javascript',
+    '.css': 'text/css',   '.json': 'application/json',
+    '.svg': 'image/svg+xml', '.png': 'image/png',
+    '.ico': 'image/x-icon', '.map': 'application/json',
+  };
+  const server = createServer((req, res) => {
+    const url = decodeURIComponent((req.url || '/').split('?')[0]);
+    const safe = url.replace(/\.\./g, '');
+    let file = join(root, safe === '/' ? 'index.html' : safe);
+    if (!existsSync(file)) file = join(root, 'index.html'); // SPA fallback
+    try {
+      const body = readFileSync(file);
+      const ext = file.slice(file.lastIndexOf('.'));
+      res.setHeader('Content-Type', mime[ext] || 'application/octet-stream');
+      res.end(body);
+    } catch (err) {
+      console.error('[matrix] ui server error serving', file, err);
+      res.statusCode = 500;
+      res.end('Internal Server Error');
+    }
+  });
+  server.listen(port);
+  return server;
+}
+
+function printHelp() {
+  console.log(`matrix — run the Matrix UI + proxy + coordinator stack
+
+Usage:
+  matrix [options]
+
+Options:
+  --port <n>              Proxy port (default 3002, env MATRIX_PROXY_PORT)
+  --coordinator-port <n>  Coordinator port (default 8000)
+  --ui-port <n>           UI HTTP port (default 3000)
+  --profile <name>        Bundled config: default | 16gb | 32gb | 8agents
+  --config <path>         Path to a custom swarm-config.json
+  -h, --help              Show this help
+
+Config resolution order:
+  --config  >  --profile  >  ./matrix.config.json
+            >  ~/.matrix/config.json  >  bundled default
+`);
+}

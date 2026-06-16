@@ -1,0 +1,5 @@
+# 8 GB RAM profile: RAG store + host-side infer (Metal). No llama in-container.
+# Infer endpoints: gemma2b (scout) on host :8087 per infer-llama/profiles/gemma2b.env
+services:
+  pgvector:
+    profiles: ["8gb"]
