@@ -3,15 +3,17 @@ package configure
 import "sync"
 
 type PortGroup struct {
-	Port      int
-	Model     string
-	Backend   string
-	Context   int
-	CtxCap    int
-	GPULayers int
-	NBatch    int
-	Parallel  int
-	Names     []string
+	Port       int
+	Model      string
+	Backend    string
+	Context    int
+	CtxCap     int
+	GPULayers  int
+	NBatch     int
+	Parallel   int
+	MaxTokens  int
+	DraftModel string
+	Names      []string
 	// Long-context + KV-memory tuning, propagated from the group's first agent.
 	FlashAttn     bool
 	ExtraArgs     []string

@@ -149,7 +149,10 @@ func killPort(port int) {
 		}
 		p := exec.Command("ps", "-p", pidStr, "-o", "comm=")
 		name, _ := p.Output()
-		if !strings.Contains(string(name), "llama-server") && !strings.Contains(string(name), "cofiswarm") {
+		// MLX servers run as python (mlx_lm.server); allow them too.
+		if !strings.Contains(string(name), "llama-server") &&
+			!strings.Contains(string(name), "cofiswarm") &&
+			!strings.Contains(string(name), "python") {
 			continue
 		}
 		if strings.Contains(string(name), "cofiswarm-configure") {

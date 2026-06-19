@@ -150,7 +150,7 @@ func (s *Server) handleConfigure(w http.ResponseWriter, r *http.Request) {
 		var failed []int
 		var servers []map[string]any
 		for _, g := range groups {
-			if err := SpawnLlama(g, s.LogDir); err != nil {
+			if err := spawnGroup(g, s.LogDir); err != nil {
 				log.Printf("configure spawn port %d: %v", g.Port, err)
 				s.Progress.Set(g.Port, "error")
 				failed = append(failed, g.Port)

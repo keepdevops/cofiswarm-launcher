@@ -16,6 +16,7 @@ type Agent struct {
 	GPULayers  int    `json:"gpu_layers"`
 	NBatch     int    `json:"n_batch"`
 	MaxConc    int    `json:"max_concurrency"`
+	MaxTokens  int    `json:"max_tokens"`
 	DraftModel string `json:"draft_model"`
 	// Long-context + KV-memory tuning (passed through to llama-server).
 	FlashAttn     bool     `json:"flash_attn"`
@@ -48,7 +49,8 @@ func BuildPortGroups(agents []Agent) ([]PortGroup, error) {
 		if bk == "" {
 			bk = "llama"
 		}
-		if bk != "llama" {
+		// llama and mlx are spawned (SpawnLlama / SpawnMLX); skip other backends.
+		if bk != "llama" && bk != "mlx" {
 			continue
 		}
 		if a.Port <= 0 {
@@ -65,6 +67,7 @@ func BuildPortGroups(agents []Agent) ([]PortGroup, error) {
 				Port: a.Port, Model: a.Model, Backend: bk,
 				Context: a.Context, CtxCap: a.CtxCap, GPULayers: a.GPULayers,
 				NBatch: a.NBatch, Parallel: par,
+				MaxTokens: a.MaxTokens, DraftModel: a.DraftModel,
 				// Tuning is per backing server: first agent of the group wins.
 				FlashAttn: a.FlashAttn, ExtraArgs: a.ExtraArgs, KVCacheType: a.KVCacheType,
 				RopeScaling: a.RopeScaling, RopeFreqBase: a.RopeFreqBase,
