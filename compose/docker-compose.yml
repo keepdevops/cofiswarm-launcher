@@ -134,7 +134,7 @@ services:
     environment:
       COFISWARM_MODE_CONFIG: /etc/cofiswarm/mode-flat.yaml
     volumes:
-      - ../../cofiswarm-mode-flat/mode-flat.yaml.example:/etc/cofiswarm/mode-flat.yaml:ro
+      - ../../cofiswarm-mode-flat/configs/mode-flat.yaml.example:/etc/cofiswarm/mode-flat.yaml:ro
 
   responder-flat:
     build:
@@ -147,6 +147,72 @@ services:
     environment:
       COFISWARM_NATS_URL: nats://nats:4222
     command: ["-name", "flat", "-subject", "swarm.observer.mode.flat", "-backend", "http://mode-flat:8021/v1/execute"]
+
+  mode-pipeline:
+    build: ../../cofiswarm-mode-pipeline
+    container_name: cofiswarm-mode-pipeline
+    profiles: ["16gb", "32gb"]
+    restart: unless-stopped
+    command: ["-listen", ":8022"]
+    environment:
+      COFISWARM_MODE_CONFIG: /etc/cofiswarm/mode-pipeline.yaml
+    volumes:
+      - ../../cofiswarm-mode-pipeline/configs/mode-pipeline.yaml.example:/etc/cofiswarm/mode-pipeline.yaml:ro
+  responder-pipeline:
+    build:
+      context: ../../cofiswarm-zmq-bridge
+      dockerfile: Dockerfile.responder
+    container_name: cofiswarm-responder-pipeline
+    profiles: ["16gb", "32gb"]
+    restart: unless-stopped
+    depends_on: [nats, mode-pipeline]
+    environment:
+      COFISWARM_NATS_URL: nats://nats:4222
+    command: ["-name", "pipeline", "-subject", "swarm.observer.mode.pipeline", "-backend", "http://mode-pipeline:8022/v1/execute"]
+
+  mode-cascade:
+    build: ../../cofiswarm-mode-cascade
+    container_name: cofiswarm-mode-cascade
+    profiles: ["16gb", "32gb"]
+    restart: unless-stopped
+    command: ["-listen", ":8023"]
+    environment:
+      COFISWARM_MODE_CONFIG: /etc/cofiswarm/mode-cascade.yaml
+    volumes:
+      - ../../cofiswarm-mode-cascade/configs/mode-cascade.yaml.example:/etc/cofiswarm/mode-cascade.yaml:ro
+  responder-cascade:
+    build:
+      context: ../../cofiswarm-zmq-bridge
+      dockerfile: Dockerfile.responder
+    container_name: cofiswarm-responder-cascade
+    profiles: ["16gb", "32gb"]
+    restart: unless-stopped
+    depends_on: [nats, mode-cascade]
+    environment:
+      COFISWARM_NATS_URL: nats://nats:4222
+    command: ["-name", "cascade", "-subject", "swarm.observer.mode.cascade", "-backend", "http://mode-cascade:8023/v1/execute"]
+
+  mode-router:
+    build: ../../cofiswarm-mode-router
+    container_name: cofiswarm-mode-router
+    profiles: ["16gb", "32gb"]
+    restart: unless-stopped
+    command: ["-listen", ":8024"]
+    environment:
+      COFISWARM_MODE_CONFIG: /etc/cofiswarm/mode-router.yaml
+    volumes:
+      - ../../cofiswarm-mode-router/configs/mode-router.yaml.example:/etc/cofiswarm/mode-router.yaml:ro
+  responder-router:
+    build:
+      context: ../../cofiswarm-zmq-bridge
+      dockerfile: Dockerfile.responder
+    container_name: cofiswarm-responder-router
+    profiles: ["16gb", "32gb"]
+    restart: unless-stopped
+    depends_on: [nats, mode-router]
+    environment:
+      COFISWARM_NATS_URL: nats://nats:4222
+    command: ["-name", "router", "-subject", "swarm.observer.mode.router", "-backend", "http://mode-router:8024/v1/execute"]
 
 volumes:
   pgvector_data:
