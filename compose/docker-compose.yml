@@ -122,5 +122,31 @@ services:
     ports:
       - "8010:8010"
 
+  # ---- mode service as a bus participant: the flat mode + a responder that makes it
+  # answerable on swarm.observer.mode.flat (the subject dispatch routes to). The same
+  # pattern repeats for pipeline/cascade/router. ----
+  mode-flat:
+    build: ../../cofiswarm-mode-flat
+    container_name: cofiswarm-mode-flat
+    profiles: ["16gb", "32gb"]
+    restart: unless-stopped
+    command: ["-listen", ":8021"]
+    environment:
+      COFISWARM_MODE_CONFIG: /etc/cofiswarm/mode-flat.yaml
+    volumes:
+      - ../../cofiswarm-mode-flat/mode-flat.yaml.example:/etc/cofiswarm/mode-flat.yaml:ro
+
+  responder-flat:
+    build:
+      context: ../../cofiswarm-zmq-bridge
+      dockerfile: Dockerfile.responder
+    container_name: cofiswarm-responder-flat
+    profiles: ["16gb", "32gb"]
+    restart: unless-stopped
+    depends_on: [nats, mode-flat]
+    environment:
+      COFISWARM_NATS_URL: nats://nats:4222
+    command: ["-name", "flat", "-subject", "swarm.observer.mode.flat", "-backend", "http://mode-flat:8021/v1/execute"]
+
 volumes:
   pgvector_data:
