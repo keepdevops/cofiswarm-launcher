@@ -2,6 +2,22 @@
 name: cofiswarm
 
 services:
+  # The observer "middle man" — the always-on NATS broker every component connects to.
+  nats:
+    image: nats:2.10-alpine
+    container_name: cofiswarm-nats
+    profiles: ["8gb", "16gb", "32gb"]
+    restart: unless-stopped
+    command: ["-m", "8222"]
+    ports:
+      - "4222:4222"   # client
+      - "8222:8222"   # monitoring / healthz
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   pgvector:
     image: pgvector/pgvector:pg16
     container_name: cofiswarm-pgvector
