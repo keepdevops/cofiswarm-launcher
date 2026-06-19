@@ -67,6 +67,73 @@ func buildLlamaArgs(g PortGroup) []string {
 	if g.NBatch > 0 {
 		args = append(args, "--batch-size", strconv.Itoa(g.NBatch))
 	}
+	args = appendTuningArgs(args, g)
+	return args
+}
+
+// turboCacheType is the KV cache-type used for the TurboQuant pilot lane. It's a
+// generic passthrough: if the installed llama-server build supports it the lane is
+// active, otherwise set kv_cache_type explicitly in config.
+const turboCacheType = "q4_0"
+
+// kvTypes splits a kv_cache_type config value ("q4_0" or "q4_0,q8_0") into the
+// k and v cache types. A single value applies to both.
+func kvTypes(spec string) (k, v string) {
+	parts := strings.SplitN(spec, ",", 2)
+	k = strings.TrimSpace(parts[0])
+	if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
+		return k, strings.TrimSpace(parts[1])
+	}
+	return k, k
+}
+
+// appendTuningArgs adds the long-context (RoPE/YaRN) and KV-memory (flash-attn,
+// cache-type quant) flags to a llama-server argv. Each flag is emitted only when
+// its config value is set; ExtraArgs go last so explicit config always wins.
+func appendTuningArgs(args []string, g PortGroup) []string {
+	// extra_args is authoritative for cache-type if it sets one — don't duplicate.
+	extraHasCacheType := false
+	for _, a := range g.ExtraArgs {
+		if a == "--cache-type-k" || a == "--cache-type-v" {
+			extraHasCacheType = true
+			break
+		}
+	}
+	// KV cache type: explicit config, else turbo lane, else flash-attn default.
+	cacheSpec := g.KVCacheType
+	if cacheSpec == "" && (g.TurboQuant || strings.Contains(strings.ToLower(g.Model), "4bit")) {
+		cacheSpec = turboCacheType
+	}
+	if g.FlashAttn {
+		args = append(args, "--flash-attn", "on")
+		if cacheSpec == "" {
+			cacheSpec = "q8_0"
+		}
+	}
+	if cacheSpec != "" && !extraHasCacheType {
+		k, v := kvTypes(cacheSpec)
+		args = append(args, "--cache-type-k", k, "--cache-type-v", v)
+	}
+	if g.RopeScaling != "" {
+		args = append(args, "--rope-scaling", g.RopeScaling)
+	}
+	if g.RopeFreqBase > 0 {
+		args = append(args, "--rope-freq-base", strconv.FormatFloat(g.RopeFreqBase, 'g', -1, 64))
+	}
+	if g.RopeFreqScale > 0 {
+		args = append(args, "--rope-freq-scale", strconv.FormatFloat(g.RopeFreqScale, 'g', -1, 64))
+	}
+	if g.RopeScaling == "linear" || g.RopeScaling == "yarn" {
+		if g.YarnOrigCtx > 0 {
+			args = append(args, "--yarn-orig-ctx", strconv.Itoa(g.YarnOrigCtx))
+		}
+		if g.YarnExtFactor > 0 {
+			args = append(args, "--yarn-ext-factor", strconv.FormatFloat(g.YarnExtFactor, 'g', -1, 64))
+		}
+	}
+	if len(g.ExtraArgs) > 0 {
+		args = append(args, g.ExtraArgs...)
+	}
 	return args
 }
 
@@ -101,6 +168,9 @@ func SpawnLlama(g PortGroup, logDir string) error {
 		return fmt.Errorf("slots dir: %w", err)
 	}
 	killPort(g.Port)
+	if g.TurboQuant || strings.Contains(strings.ToLower(g.Model), "4bit") {
+		fmt.Fprintf(os.Stderr, "[configure] TurboQuant lane active on port %d (kv=%s)\n", g.Port, g.KVCacheType)
+	}
 	args := buildLlamaArgs(g)
 	cmd := exec.Command(bin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

@@ -12,6 +12,16 @@ type PortGroup struct {
 	NBatch    int
 	Parallel  int
 	Names     []string
+	// Long-context + KV-memory tuning, propagated from the group's first agent.
+	FlashAttn     bool
+	ExtraArgs     []string
+	KVCacheType   string
+	RopeScaling   string
+	RopeFreqBase  float64
+	RopeFreqScale float64
+	YarnOrigCtx   int
+	YarnExtFactor float64
+	TurboQuant    bool
 }
 
 type Progress struct {
