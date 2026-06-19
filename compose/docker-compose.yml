@@ -38,5 +38,89 @@ services:
       timeout: 3s
       retries: 10
 
+  # ---- observer control plane (16gb/32gb). Build contexts are sibling repos under
+  # ~/cofiswarm/repos; all wired to the nats broker. ----
+  zmq-bridge:
+    build: ../../cofiswarm-zmq-bridge
+    container_name: cofiswarm-zmq-bridge
+    profiles: ["16gb", "32gb"]
+    restart: unless-stopped
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      COFISWARM_BUS: nats
+      COFISWARM_NATS_URL: nats://nats:4222
+      COFISWARM_ZMQ_TOPICS: /etc/cofiswarm/topics.yaml
+    volumes:
+      - ../../cofiswarm-common/zmq/topics.yaml:/etc/cofiswarm/topics.yaml:ro
+    ports:
+      - "5555:5555"
+
+  observer:
+    build: ../../cofiswarm-observer
+    container_name: cofiswarm-observer
+    profiles: ["16gb", "32gb"]
+    restart: unless-stopped
+    depends_on: [zmq-bridge]
+    environment:
+      COFISWARM_BRIDGE_URL: http://zmq-bridge:5555
+    ports:
+      - "8016:8016"
+
+  agent-registry:
+    build: ../../cofiswarm-agent-registry
+    container_name: cofiswarm-agent-registry
+    profiles: ["16gb", "32gb"]
+    restart: unless-stopped
+    depends_on: [zmq-bridge]
+    environment:
+      COFISWARM_BRIDGE_URL: http://zmq-bridge:5555
+      COFISWARM_SWARM_CONFIG: /etc/cofiswarm/swarm-config.json
+      COFISWARM_AGENT_REGISTRY_STATE: /tmp/overrides.json
+    volumes:
+      - ../../cofiswarm-config/swarm-config.json:/etc/cofiswarm/swarm-config.json:ro
+    ports:
+      - "8012:8012"
+
+  kvpool:
+    build: ../../cofiswarm-kvpool
+    container_name: cofiswarm-kvpool
+    profiles: ["16gb", "32gb"]
+    restart: unless-stopped
+    environment:
+      COFISWARM_KVPOOL_CONFIG: /etc/cofiswarm/kvpool.yaml
+    volumes:
+      - ../../cofiswarm-kvpool/configs/kvpool.yaml:/etc/cofiswarm/kvpool.yaml:ro
+    ports:
+      - "8014:8014"
+
+  slot-manager:
+    build: ../../cofiswarm-slot-manager
+    container_name: cofiswarm-slot-manager
+    profiles: ["16gb", "32gb"]
+    restart: unless-stopped
+    depends_on: [kvpool]
+    environment:
+      COFISWARM_SLOT_MANAGER_CONFIG: /etc/cofiswarm/endpoints.json
+      COFISWARM_KVPOOL_URL: http://kvpool:8014
+    volumes:
+      - ../../cofiswarm-slot-manager/configs/endpoints.json:/etc/cofiswarm/endpoints.json:ro
+    ports:
+      - "8013:8013"
+
+  dispatch:
+    build: ../../cofiswarm-dispatch
+    container_name: cofiswarm-dispatch
+    profiles: ["16gb", "32gb"]
+    restart: unless-stopped
+    depends_on: [zmq-bridge, kvpool]
+    environment:
+      COFISWARM_BRIDGE_URL: http://zmq-bridge:5555
+      COFISWARM_ROUTE_BUS: "1"
+      COFISWARM_KVPOOL_URL: http://kvpool:8014
+    ports:
+      - "8010:8010"
+
 volumes:
   pgvector_data:
