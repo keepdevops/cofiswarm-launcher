@@ -1,0 +1,6 @@
+# 32 GB RAM profile: RAG store + NATS bus + full roster; host-side infer (Metal).
+services:
+  pgvector:
+    profiles: ["32gb"]
+  nats:
+    profiles: ["32gb"]
