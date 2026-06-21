@@ -147,27 +147,7 @@ func (s *Server) handleConfigure(w http.ResponseWriter, r *http.Request) {
 				done <- result{failed: ports}
 			}
 		}()
-		var failed []int
-		var servers []map[string]any
-		for _, g := range groups {
-			if err := spawnGroup(g, s.LogDir); err != nil {
-				log.Printf("configure spawn port %d: %v", g.Port, err)
-				s.Progress.Set(g.Port, "error")
-				failed = append(failed, g.Port)
-				continue
-			}
-			if err := WaitHealthy(g.Port, s.HealthTimeout); err != nil {
-				log.Printf("configure health port %d: %v", g.Port, err)
-				s.Progress.Set(g.Port, "error")
-				failed = append(failed, g.Port)
-				continue
-			}
-			s.Progress.Set(g.Port, "ready")
-			servers = append(servers, map[string]any{
-				"port": g.Port, "model": g.Model, "agents": g.Names, "status": "ready",
-			})
-		}
-		s.Progress.Finish()
+		servers, failed := s.RunGroups(groups)
 		done <- result{failed: failed, servers: servers}
 	}()
 
@@ -180,6 +160,33 @@ func (s *Server) handleConfigure(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "accepted", "active": true})
 		go func() { <-done }()
 	}
+}
+
+// RunGroups spawns each port group and waits for health, updating Progress. Returns the
+// ready servers and any failed ports. Shared by the HTTP and bus (-bus) configure paths.
+func (s *Server) RunGroups(groups []PortGroup) ([]map[string]any, []int) {
+	var failed []int
+	var servers []map[string]any
+	for _, g := range groups {
+		if err := spawnGroup(g, s.LogDir); err != nil {
+			log.Printf("configure spawn port %d: %v", g.Port, err)
+			s.Progress.Set(g.Port, "error")
+			failed = append(failed, g.Port)
+			continue
+		}
+		if err := WaitHealthy(g.Port, s.HealthTimeout); err != nil {
+			log.Printf("configure health port %d: %v", g.Port, err)
+			s.Progress.Set(g.Port, "error")
+			failed = append(failed, g.Port)
+			continue
+		}
+		s.Progress.Set(g.Port, "ready")
+		servers = append(servers, map[string]any{
+			"port": g.Port, "model": g.Model, "agents": g.Names, "status": "ready",
+		})
+	}
+	s.Progress.Finish()
+	return servers, failed
 }
 
 func (s *Server) writeConfigureResult(w http.ResponseWriter, groups []PortGroup, failed []int, servers []map[string]any) {
