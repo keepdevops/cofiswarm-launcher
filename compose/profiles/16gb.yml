@@ -1,7 +1,5 @@
-# 16 GB RAM profile: RAG store + NATS bus + UI stub; host-side infer (Metal).
+# 16 GB RAM profile: serverless RAG (sqlite-vec) + NATS bus + UI stub; host-side infer (Metal).
 # Full server_groups run on host via cofiswarm-infer-* profiles.
 services:
-  pgvector:
-    profiles: ["16gb"]
   nats:
     profiles: ["16gb"]

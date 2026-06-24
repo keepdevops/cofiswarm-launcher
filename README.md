@@ -2,7 +2,7 @@
 
 Stack launcher — **Docker Compose** instead of `posix_spawn` (`proxy_configure_spawn.cpp`).
 
-- Migration: Sprint 7 in [MIGRATION-SPRINTS](https://github.com/keepdevops/cofiswarmdev/blob/main/docs/MIGRATION-SPRINTS.md)
+- Migration: Sprint 7 in [MIGRATION-SPRINTS](https://github.com/keepdevops/cofiswarm-docs/blob/main/MIGRATION-SPRINTS.md)
 - Legacy: `legacy/cpp/`, `internal/legacy/*.py`, `scripts/brewctl`
 
 ## Profile gate (8 GB)
@@ -14,15 +14,14 @@ make build
 ./bin/cofiswarm-launcher -compose-dir compose -dry-run profile up 8gb
 ```
 
-`8gb` profile starts **pgvector** only; llama/MLX infer runs on host (Metal) via `cofiswarm-infer-*` profiles.
+`8gb` profile starts the **nats** broker only; RAG is serverless (sqlite-vec, a local `.db` file — no container) and llama/MLX infer runs on host (Metal) via `cofiswarm-infer-*` profiles.
 
 ## Compose layout
 
 ```
 compose/
 ├── docker-compose.yml      # base services + profile tags
-├── profiles/8gb.yml        # 8 GB overlay
-└── migrations/             # pgvector init
+└── profiles/8gb.yml        # 8 GB overlay
 ```
 
 ## Subcommands
