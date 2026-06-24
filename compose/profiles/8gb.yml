@@ -1,5 +1,4 @@
-# 8 GB RAM profile: RAG store + host-side infer (Metal). No llama in-container.
-# Infer endpoints: gemma2b (scout) on host :8087 per infer-llama/profiles/gemma2b.env
-services:
-  pgvector:
-    profiles: ["8gb"]
+# 8 GB RAM profile: serverless RAG (sqlite-vec) + host-side infer (Metal).
+# No in-container services beyond the base nats broker; gemma2b (scout) runs on
+# host :8087 per infer-llama/profiles/gemma2b.env. RAG store is a local .db file.
+services: {}

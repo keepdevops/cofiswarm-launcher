@@ -18,25 +18,7 @@ services:
       timeout: 3s
       retries: 10
 
-  pgvector:
-    image: pgvector/pgvector:pg16
-    container_name: cofiswarm-pgvector
-    profiles: ["8gb", "16gb", "32gb"]
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: matrix
-      POSTGRES_PASSWORD: matrix
-      POSTGRES_DB: matrix_rag
-    ports:
-      - "5433:5432"
-    volumes:
-      - pgvector_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U matrix -d matrix_rag"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+  # RAG is serverless (sqlite-vec, a local .db file) — no database container.
 
   # ---- observer control plane (16gb/32gb). Build contexts are sibling repos under
   # ~/cofiswarm/repos; all wired to the nats broker. ----
@@ -271,6 +253,3 @@ services:
     environment:
       COFISWARM_NATS_URL: nats://nats:4222
     command: ["-name", "mlx1b", "-subject", "swarm.observer.model.mlx1b", "-backend", "http://host.docker.internal:8083/v1/chat/completions"]
-
-volumes:
-  pgvector_data:

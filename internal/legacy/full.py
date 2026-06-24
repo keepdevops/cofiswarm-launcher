@@ -1,7 +1,10 @@
-"""brewctl up / down — orchestrate the full stack (pgvector + sidecar + UI).
+"""brewctl up / down — orchestrate the full stack (RAG sidecar + UI).
 
-up:    rag-docker-compose up → wait pgvector → spawn rag ingest sidecar → run_launch
-down:  run_shutdown → kill sidecar :8001 → optionally rag-docker-compose down
+RAG is serverless now: the store is a local sqlite-vec .db file the ingest
+sidecar writes directly, so there is no database container to boot/stop.
+
+up:    spawn rag ingest sidecar → auto-index → run_launch
+down:  run_shutdown → kill sidecar :8001
 """
 from __future__ import annotations
 
@@ -21,10 +24,9 @@ logger = logging.getLogger(__name__)
 
 REPO = Path(__file__).resolve().parents[2]
 SIDECAR_PORT = 8001
-RAG_WRAPPER = REPO / "scripts" / "rag-docker-compose.sh"
 SIDECAR_SCRIPT = REPO / "scripts" / "rag-ingest-server.py"
 COORD_CONFIG = REPO / "config" / "coordinator.json"
-VALID_EMBEDDERS = {"hash", "mlx"}
+VALID_EMBEDDERS = {"hash", "mlx", "nomic"}
 
 
 def rag_embedder() -> str:
@@ -53,10 +55,6 @@ def rag_embedder() -> str:
     return "mlx"
 
 
-def _run(cmd: list[str], **kw) -> int:
-    return subprocess.run(cmd, cwd=REPO, **kw).returncode
-
-
 def _wait_port(port: int, timeout: float = 15.0) -> bool:
     import socket
     end = time.time() + timeout
@@ -69,24 +67,6 @@ def _wait_port(port: int, timeout: float = 15.0) -> bool:
             except OSError:
                 time.sleep(0.2)
     return False
-
-
-def _pgvector_up() -> int:
-    if not RAG_WRAPPER.is_file():
-        logger.error("rag-docker-compose.sh missing at %s", RAG_WRAPPER)
-        print(f"FATAL: {RAG_WRAPPER} not found")
-        return 2
-    print("Starting pgvector ...")
-    rc = _run(["bash", str(RAG_WRAPPER), "up"])
-    if rc != 0:
-        logger.error("rag-docker-compose up failed rc=%d", rc)
-        print(f"FATAL: pgvector failed to start (rc={rc})")
-        return rc
-    rc = _run(["bash", str(RAG_WRAPPER), "wait"])
-    if rc != 0:
-        logger.error("pgvector did not become ready (rc=%d)", rc)
-        return rc
-    return 0
 
 
 def _sidecar_up() -> int:
@@ -146,9 +126,6 @@ def run_up(no_rag: bool = False, no_index: bool = False, index_path: Path | None
     print("=" * 60)
     print("SWARM MATRIX up" + (" (no-rag)" if no_rag else ""))
     if not no_rag:
-        rc = _pgvector_up()
-        if rc != 0:
-            return rc
         rc = _sidecar_up()
         if rc != 0:
             return rc
@@ -170,23 +147,11 @@ def _sidecar_down() -> None:
         logger.error("sidecar pids still alive: %s", survivors)
 
 
-def _pgvector_down() -> int:
-    if not RAG_WRAPPER.is_file():
-        logger.error("rag-docker-compose.sh missing at %s", RAG_WRAPPER)
-        return 0
-    print("Stopping pgvector ...")
-    return _run(["bash", str(RAG_WRAPPER), "down"])
-
-
 def run_down(full: bool = False) -> int:
+    # `full` retained for CLI compatibility; RAG has no container to stop now
+    # (the sqlite-vec .db file persists on disk between runs).
+    _ = full
     rc = run_shutdown()
     print("-" * 60)
     _sidecar_down()
-    if full:
-        rc2 = _pgvector_down()
-        if rc2 != 0:
-            logger.error("pgvector down rc=%d", rc2)
-            rc = rc or rc2
-    else:
-        print("  pgvector left running (use --full to also stop it)")
     return rc
