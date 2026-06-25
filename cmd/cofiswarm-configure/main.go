@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/keepdevops/cofiswarm-launcher/internal/bus"
 	"github.com/keepdevops/cofiswarm-launcher/internal/configure"
+	"github.com/keepdevops/cofiswarm-observer-sdk/pkg/buspresence"
 	"github.com/keepdevops/cofiswarm-observer-sdk/pkg/servicecomponent"
 )
 
@@ -26,8 +28,27 @@ func main() {
 		return
 	}
 
-	log.Printf("configure API on %s state=%s", *addr, srv.StateDir)
-	log.Fatal(http.ListenAndServe(*addr, srv.Handler()))
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Carrier presence (broker-free, default-off via COFISWARM_BRIDGE_URL): appear in the
+	// observer live roster over the zmq-bridge without needing a NATS broker.
+	stopPresence := buspresence.StartPresence(os.Getenv("COFISWARM_BRIDGE_URL"), "launcher", map[string]any{"name": "launcher"})
+	defer stopPresence()
+
+	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
+	go func() {
+		log.Printf("configure API on %s state=%s", *addr, srv.StateDir)
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("configure API serve: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Print("configure API stopping")
+	if err := httpSrv.Shutdown(context.Background()); err != nil {
+		log.Printf("configure API shutdown: %v", err)
+	}
 }
 
 func serveBus(url string, srv *configure.Server) {
