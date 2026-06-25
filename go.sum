@@ -1,5 +1,7 @@
 github.com/keepdevops/cofiswarm-observer-sdk v1.2.0 h1:32fjD51Xs+g7YUn3M32YozspUfmspi8x8ZONescThQE=
 github.com/keepdevops/cofiswarm-observer-sdk v1.2.0/go.mod h1:X3hGazoDLqalWKCNtn12ZNiXR39+YaUwvfKwCW2XNbI=
+github.com/keepdevops/cofiswarm-observer-sdk v1.3.0 h1:SSfKhdWBOb5YDBN6vkIas34Nmn/rwiyLUa44uoDSXSw=
+github.com/keepdevops/cofiswarm-observer-sdk v1.3.0/go.mod h1:X3hGazoDLqalWKCNtn12ZNiXR39+YaUwvfKwCW2XNbI=
 github.com/klauspost/compress v1.18.5 h1:/h1gH5Ce+VWNLSWqPzOVn6XBO+vJbCNGvjoaGBFW2IE=
 github.com/klauspost/compress v1.18.5/go.mod h1:cwPg85FWrGar70rWktvGQj8/hthj3wpl0PGDogxkrSQ=
 github.com/nats-io/nats.go v1.52.0 h1:n3avV4VBsCgsdwh71TppsTwtv+QdPs7ntSKM8qJLGsc=

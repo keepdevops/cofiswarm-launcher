@@ -2,7 +2,7 @@ module github.com/keepdevops/cofiswarm-launcher
 
 go 1.25.0
 
-require github.com/keepdevops/cofiswarm-observer-sdk v1.2.0
+require github.com/keepdevops/cofiswarm-observer-sdk v1.3.0
 
 require (
 	github.com/klauspost/compress v1.18.5 // indirect
