@@ -9,3 +9,7 @@ test/standalone/run/**/*
 .env
 *.log
 bin/
+
+# python bytecode
+__pycache__/
+*.pyc
